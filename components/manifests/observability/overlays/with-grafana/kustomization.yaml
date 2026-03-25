@@ -23,9 +23,6 @@ configMapGenerator:
   - name: grafana-dashboard-cluster
     files:
       - dashboards/k8s-cluster-monitoring.json
-  - name: grafana-dashboard-kube-state
-    files:
-      - dashboards/k8s-kube-state-metrics.json
   - name: grafana-dashboard-nodes
     files:
       - dashboards/k8s-nodes.json

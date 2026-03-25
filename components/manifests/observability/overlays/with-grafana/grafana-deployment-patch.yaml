@@ -30,8 +30,6 @@ spec:
           mountPath: /dashboards-src/operator
         - name: dashboard-cluster
           mountPath: /dashboards-src/cluster
-        - name: dashboard-kube-state
-          mountPath: /dashboards-src/kube-state
         - name: dashboard-nodes
           mountPath: /dashboards-src/nodes
         - name: dashboard-namespace
@@ -69,9 +67,6 @@ spec:
       - name: dashboard-cluster
         configMap:
           name: grafana-dashboard-cluster
-      - name: dashboard-kube-state
-        configMap:
-          name: grafana-dashboard-kube-state
       - name: dashboard-nodes
         configMap:
           name: grafana-dashboard-nodes
