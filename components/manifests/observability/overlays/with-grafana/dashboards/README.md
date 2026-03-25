@@ -34,7 +34,6 @@ Each `.json` file in this directory is a Grafana dashboard provisioned automatic
 |------|-------------|
 | `ambient-operator-dashboard.json` | Ambient Code operator session metrics |
 | `k8s-cluster-monitoring.json` | Cluster-level CPU, memory, network (based on Grafana #9135) |
-| `k8s-kube-state-metrics.json` | kube-state-metrics summary (based on Grafana #13332) |
 | `k8s-nodes.json` | Node-level resource usage |
 | `k8s-namespace.json` | Namespace-level resource usage |
 | `k8s-pods.json` | Pod-level resource usage |
