@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1474,6 +1475,172 @@ func UpdateSessionDisplayName(c *gin.Context) {
 	c.JSON(http.StatusOK, session)
 }
 
+// SwitchModel switches the LLM model for a running session
+// POST /api/projects/:projectName/agentic-sessions/:sessionName/model
+func SwitchModel(c *gin.Context) {
+	project := c.GetString("project")
+	sessionName := c.Param("sessionName")
+	_, k8sDyn := GetK8sClientsForRequest(c)
+	if k8sDyn == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or missing token"})
+		c.Abort()
+		return
+	}
+
+	var req struct {
+		Model string `json:"model" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: model is required"})
+		return
+	}
+
+	if req.Model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model must not be empty"})
+		return
+	}
+
+	gvr := GetAgenticSessionV1Alpha1Resource()
+
+	// Get current session
+	item, err := k8sDyn.Resource(gvr).Namespace(project).Get(context.TODO(), sessionName, v1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get session"})
+		return
+	}
+
+	// Ensure session is Running
+	if err := ensureRuntimeMutationAllowed(item); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get current model for comparison
+	spec, ok := item.Object["spec"].(map[string]interface{})
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid session spec"})
+		return
+	}
+	llmSettings, _, _ := unstructured.NestedMap(spec, "llmSettings")
+	previousModel, _ := llmSettings["model"].(string)
+
+	// No-op if same model
+	if previousModel == req.Model {
+		session := types.AgenticSession{
+			APIVersion: item.GetAPIVersion(),
+			Kind:       item.GetKind(),
+		}
+		if meta, ok := item.Object["metadata"].(map[string]interface{}); ok {
+			session.Metadata = meta
+		}
+		session.Spec = parseSpec(spec)
+		if status, ok := item.Object["status"].(map[string]interface{}); ok {
+			session.Status = parseStatus(status)
+		}
+		c.JSON(http.StatusOK, session)
+		return
+	}
+
+	// Update the CR first to validate RBAC (user needs update permission).
+	// This ensures a user with only get access cannot trigger a runner-side
+	// model switch without also being allowed to persist the change.
+	if llmSettings == nil {
+		llmSettings = map[string]interface{}{}
+	}
+	llmSettings["model"] = req.Model
+	spec["llmSettings"] = llmSettings
+
+	updated, err := k8sDyn.Resource(gvr).Namespace(project).Update(context.TODO(), item, v1.UpdateOptions{})
+	if err != nil {
+		log.Printf("Failed to update session CR %s for model switch: %v", sessionName, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update session record"})
+		return
+	}
+
+	// Proxy to runner — if runner rejects (e.g., agent is mid-generation), revert the CR.
+	// Sanitize the CR name against a strict allowlist to prevent SSRF.
+	sanitizedName, err := sanitizeK8sName(item.GetName())
+	if err != nil {
+		log.Printf("Invalid session name %q for model switch: %v", item.GetName(), err)
+		revertModelSwitch(updated, previousModel, k8sDyn, gvr, project)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session name"})
+		return
+	}
+	sanitizedProject, err := sanitizeK8sName(project)
+	if err != nil {
+		log.Printf("Invalid project name %q for model switch: %v", project, err)
+		revertModelSwitch(updated, previousModel, k8sDyn, gvr, project)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid project name"})
+		return
+	}
+	serviceName := getRunnerServiceName(sanitizedName)
+	runnerURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8001/model", serviceName, sanitizedProject)
+	runnerReq := map[string]string{"model": req.Model}
+	reqBody, _ := json.Marshal(runnerReq)
+
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), "POST", runnerURL, bytes.NewReader(reqBody))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create runner request"})
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		log.Printf("Failed to proxy model switch to runner for session %s: %v", sessionName, err)
+		// Revert the CR update on the server-returned object
+		revertModelSwitch(updated, previousModel, k8sDyn, gvr, project)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to reach session runner"})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Runner rejected model switch for session %s: %d %s", sessionName, resp.StatusCode, string(body))
+		// Revert the CR update on the server-returned object
+		revertModelSwitch(updated, previousModel, k8sDyn, gvr, project)
+		// Forward runner's status code and error
+		c.Data(resp.StatusCode, "application/json", body)
+		return
+	}
+
+	session := types.AgenticSession{
+		APIVersion: updated.GetAPIVersion(),
+		Kind:       updated.GetKind(),
+	}
+	if meta, ok := updated.Object["metadata"].(map[string]interface{}); ok {
+		session.Metadata = meta
+	}
+	if s, ok := updated.Object["spec"].(map[string]interface{}); ok {
+		session.Spec = parseSpec(s)
+	}
+	if status, ok := updated.Object["status"].(map[string]interface{}); ok {
+		session.Status = parseStatus(status)
+	}
+
+	c.JSON(http.StatusOK, session)
+}
+
+// revertModelSwitch restores the previous model on the server-returned CR object.
+// Called when the runner rejects a model switch after the CR was already updated.
+func revertModelSwitch(updated *unstructured.Unstructured, previousModel string, k8sDyn dynamic.Interface, gvr schema.GroupVersionResource, namespace string) {
+	if updatedSpec, ok := updated.Object["spec"].(map[string]interface{}); ok {
+		if updatedLLM, ok := updatedSpec["llmSettings"].(map[string]interface{}); ok {
+			updatedLLM["model"] = previousModel
+			_, err := k8sDyn.Resource(gvr).Namespace(namespace).Update(context.TODO(), updated, v1.UpdateOptions{})
+			if err != nil {
+				log.Printf("Failed to revert model switch for session %s: %v", updated.GetName(), err)
+			}
+		}
+	}
+}
+
 // SelectWorkflow sets the active workflow for a session
 // POST /api/projects/:projectName/agentic-sessions/:sessionName/workflow
 func SelectWorkflow(c *gin.Context) {
@@ -1943,6 +2110,20 @@ func RemoveRepo(c *gin.Context) {
 
 	log.Printf("Removed repository %s from session %s in project %s", repoName, sessionName, project)
 	c.JSON(http.StatusOK, gin.H{"message": "Repository removed", "session": session})
+}
+
+// k8sNameRegexp matches valid Kubernetes resource names (RFC 1123 DNS label).
+var k8sNameRegexp = regexp.MustCompile(`^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$`)
+
+// sanitizeK8sName validates that name is a valid Kubernetes resource name
+// and returns it unchanged if valid, or returns an error. This breaks the
+// taint chain for static analysis (CodeQL SSRF) by proving the value matches
+// a strict allowlist before it reaches any network call.
+func sanitizeK8sName(name string) (string, error) {
+	if len(name) == 0 || len(name) > 253 || !k8sNameRegexp.MatchString(name) {
+		return "", fmt.Errorf("invalid Kubernetes resource name: %q", name)
+	}
+	return name, nil
 }
 
 // getRunnerServiceName returns the K8s Service name for a session's runner.
