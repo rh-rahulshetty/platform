@@ -57,7 +57,11 @@ jobs:
           NUMBER="${{ github.event.issue.number }}"
           TITLE=$(gh issue view "$NUMBER" --repo "${{ github.repository }}" --json title --jq '.title')
           echo "number=$NUMBER" >> $GITHUB_OUTPUT
-          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          {
+            echo "title<<EOF"
+            echo "$TITLE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Check for existing PR
         id: existing
@@ -103,11 +107,15 @@ jobs:
                unclear requirements, multiple valid approaches, missing context — you
                MUST ask for clarification. IMPORTANT: Before calling AskUserQuestion,
                ALWAYS send a Slack notification first (the session stops streaming when
-               AskUserQuestion is called, so the notification must go out before):
+               AskUserQuestion is called, so the notification must go out before).
+               Use Slack mrkdwn link format: <URL|display text>. Example:
                ```bash
-               curl -X POST -H 'Content-type: application/json' \
-                 --data '{"text":"I have a question about #${{ steps.issue.outputs.number }}\n*Issue*: https://github.com/${{ github.repository }}/issues/${{ steps.issue.outputs.number }}\n*Session*: '"$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME"'\n*Question*: <brief summary of what you need>"}' \
-                 "$SLACK_WEBHOOK_URL"
+               TITLE=$(gh issue view ${{ steps.issue.outputs.number }} --repo ${{ github.repository }} --json title --jq '.title')
+               PAYLOAD=$(jq -nc --arg text "❓ *Question about <https://github.com/${{ github.repository }}/issues/${{ steps.issue.outputs.number }}|#${{ steps.issue.outputs.number }} — $TITLE>*
+               <your question here>
+
+               <$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME|View Session>" '{text: $text}')
+               curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
                ```
                Only send if SLACK_WEBHOOK_URL is set. Then call AskUserQuestion.
             4. Implement the fix. Write tests if the area has existing test coverage.
@@ -119,9 +127,20 @@ jobs:
                ---
                🤖 [Ambient Session](<SESSION_URL>)
             6. Add the `ambient-code:managed` label to the PR.
-            7. Ensure CI passes. If it fails, investigate and fix.
-            8. Do not merge. Leave the PR open for human review.
-            9. When you comment on the PR, include this footer at the end:
+            7. After creating the PR, send a Slack notification with a brief summary
+               of what you changed. Use Slack mrkdwn link format: <URL|display text>. Example:
+               ```bash
+               TITLE=$(gh issue view ${{ steps.issue.outputs.number }} --repo ${{ github.repository }} --json title --jq '.title')
+               PAYLOAD=$(jq -nc --arg text "🔧 *PR created for <https://github.com/${{ github.repository }}/issues/${{ steps.issue.outputs.number }}|#${{ steps.issue.outputs.number }} — $TITLE>*
+               <PR_URL|View PR> · <SESSION_URL|View Session>
+
+               <1-2 sentence summary of what you changed>" '{text: $text}')
+               curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+               ```
+               Only send if SLACK_WEBHOOK_URL is set.
+            8. Ensure CI passes. If it fails, investigate and fix.
+            9. Do not merge. Leave the PR open for human review.
+            10. When you comment on the PR, include this footer at the end:
                _🤖 [Session](<SESSION_URL>)_
 
             ## Session URL
@@ -140,7 +159,7 @@ jobs:
           wait: 'true'
           timeout: '0'
           environment-variables: >-
-            {"SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}"}
+            {"SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}", "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
 
       - name: Post-session update comment
         if: steps.existing.outputs.skip != 'true'
@@ -228,6 +247,13 @@ jobs:
             echo "type=pr" >> $GITHUB_OUTPUT
             echo "url=https://github.com/${{ github.repository }}/pull/$NUMBER" >> $GITHUB_OUTPUT
 
+            TITLE=$(gh pr view "$NUMBER" --repo "${{ github.repository }}" --json title --jq '.title')
+            {
+              echo "title<<EOF"
+              echo "$TITLE"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+
             IS_FORK=$(gh pr view "$NUMBER" --repo "${{ github.repository }}" --json isCrossRepository --jq '.isCrossRepository')
             echo "is_fork=$IS_FORK" >> $GITHUB_OUTPUT
 
@@ -238,6 +264,14 @@ jobs:
           else
             echo "type=issue" >> $GITHUB_OUTPUT
             echo "url=https://github.com/${{ github.repository }}/issues/$NUMBER" >> $GITHUB_OUTPUT
+
+            TITLE=$(gh issue view "$NUMBER" --repo "${{ github.repository }}" --json title --jq '.title')
+            {
+              echo "title<<EOF"
+              echo "$TITLE"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+
             echo "is_fork=false" >> $GITHUB_OUTPUT
 
             # Check for existing ambient-code:managed PR for this issue and get its session ID
@@ -304,14 +338,18 @@ jobs:
 
             ## Slack Notifications
 
-            When you need human attention — whether you hit the circuit breaker (3 retries),
-            you're stuck and can't proceed, or you use the AskUserQuestion tool — send a
-            Slack notification:
+            When you need human attention — circuit breaker, stuck, or before calling
+            AskUserQuestion — send a Slack notification. IMPORTANT: Always send BEFORE
+            calling AskUserQuestion (the session stops streaming on that call).
+            Use Slack mrkdwn link format: <URL|display text>. Example:
 
             ```bash
-            curl -X POST -H 'Content-type: application/json' \
-              --data '{"text":"I need human attention\n*PR*: ${{ steps.context.outputs.url }}\n*Session*: '"$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME"'\n*Reason*: <brief reason>"}' \
-              "$SLACK_WEBHOOK_URL"
+            TITLE=$(gh pr view ${{ steps.context.outputs.number }} --repo ${{ github.repository }} --json title --jq '.title')
+            PAYLOAD=$(jq -nc --arg text "🚨 *Need help with <${{ steps.context.outputs.url }}|PR #${{ steps.context.outputs.number }} — $TITLE>*
+            <reason — what you tried and why you're stuck>
+
+            <$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME|View Session>" '{text: $text}')
+            curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
             ```
 
             The environment variables SLACK_WEBHOOK_URL, PLATFORM_HOST, AGENTIC_SESSION_NAMESPACE,
@@ -344,11 +382,15 @@ jobs:
                unclear requirements, multiple valid approaches, missing context — you
                MUST ask for clarification. IMPORTANT: Before calling AskUserQuestion,
                ALWAYS send a Slack notification first (the session stops streaming when
-               AskUserQuestion is called, so the notification must go out before):
+               AskUserQuestion is called, so the notification must go out before).
+               Use Slack mrkdwn link format: <URL|display text>. Example:
                ```bash
-               curl -X POST -H 'Content-type: application/json' \
-                 --data '{"text":"I have a question about #${{ steps.context.outputs.number }}\n*Issue*: ${{ steps.context.outputs.url }}\n*Session*: '"$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME"'\n*Question*: <brief summary of what you need>"}' \
-                 "$SLACK_WEBHOOK_URL"
+               TITLE=$(gh issue view ${{ steps.context.outputs.number }} --repo ${{ github.repository }} --json title --jq '.title')
+               PAYLOAD=$(jq -nc --arg text "❓ *Question about <${{ steps.context.outputs.url }}|#${{ steps.context.outputs.number }} — $TITLE>*
+               <your question here>
+
+               <$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME|View Session>" '{text: $text}')
+               curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
                ```
                Only send if SLACK_WEBHOOK_URL is set. Then call AskUserQuestion.
             4. Implement the fix. Write tests if the area has existing test coverage.
@@ -360,9 +402,20 @@ jobs:
                ---
                🤖 [Ambient Session](<SESSION_URL>)
             6. Add the `ambient-code:managed` label to the PR.
-            7. Ensure CI passes. If it fails, investigate and fix.
-            8. Do not merge. Leave the PR open for human review.
-            9. When you comment on the PR, include this footer at the end:
+            7. After creating the PR, send a Slack notification with a brief summary
+               of what you changed. Use Slack mrkdwn link format: <URL|display text>. Example:
+               ```bash
+               TITLE=$(gh issue view ${{ steps.context.outputs.number }} --repo ${{ github.repository }} --json title --jq '.title')
+               PAYLOAD=$(jq -nc --arg text "🔧 *PR created for <${{ steps.context.outputs.url }}|#${{ steps.context.outputs.number }} — $TITLE>*
+               <PR_URL|View PR> · <SESSION_URL|View Session>
+
+               <1-2 sentence summary of what you changed>" '{text: $text}')
+               curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
+               ```
+               Only send if SLACK_WEBHOOK_URL is set.
+            8. Ensure CI passes. If it fails, investigate and fix.
+            9. Do not merge. Leave the PR open for human review.
+            10. When you comment on the PR, include this footer at the end:
                _🤖 [Session](<SESSION_URL>)_
 
             ## Session URL
@@ -381,7 +434,7 @@ jobs:
           wait: 'true'
           timeout: '0'
           environment-variables: >-
-            {"SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}"}
+            {"SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}", "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
 
       # Custom prompt: @ambient-code <instruction> — pass user's text
       - name: Run custom prompt
@@ -406,7 +459,7 @@ jobs:
           wait: 'true'
           timeout: '0'
           environment-variables: >-
-            {"SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}"}
+            {"SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}", "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
 
       - name: Post check run on PR
         if: >-
@@ -835,11 +888,16 @@ jobs:
 
           ## Slack Notifications
 
-          When you need human attention — circuit breaker, stuck, or using AskUserQuestion — send:
+          When you need human attention — circuit breaker, stuck, or before calling
+          AskUserQuestion — send a Slack notification. IMPORTANT: Always send BEFORE
+          calling AskUserQuestion. Use Slack mrkdwn link format: <URL|display text>.
 
-          curl -X POST -H 'Content-type: application/json' \\
-            --data '{{"text":"I need human attention\\n*PR*: https://github.com/{REPO}/pull/{number}\\n*Session*: '"$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME"'\\n*Reason*: <brief reason>"}}' \\
-            "$SLACK_WEBHOOK_URL"
+          TITLE=$(gh pr view {number} --repo {REPO} --json title --jq '.title')
+          PAYLOAD=$(jq -nc --arg text "🚨 *Need help with <https://github.com/{REPO}/pull/{number}|PR #{number} — $TITLE>*
+          <reason — what you tried and why you are stuck>
+
+          <$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME|View Session>" '{{text: $text}}')
+          curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
 
           Only send if SLACK_WEBHOOK_URL is set."""
 
