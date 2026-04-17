@@ -99,6 +99,7 @@ component DEVELOPMENT.md files (see [BOOKMARKS.md](BOOKMARKS.md) > Component Dev
 - **No `panic()` in production**: Return explicit `fmt.Errorf` with context
 - **No `any` types in frontend**: Use proper types, `unknown`, or generic constraints
 - **Feature flags strongly recommended**: Gate new features behind Unleash flags. Use `/unleash-flag` to set up
+- **No new CRDs**: Existing CRDs (AgenticSession, ProjectSettings) are grandfathered. For new persistent storage, confirm with the user whether to use repo files or PostgreSQL — do not default to K8s custom resources
 - **Conventional commits**: Squashed on merge to `main`
 - **Design for extensibility before adding items**: When building infrastructure that will have
   things added to it (menus, config schemas, API surfaces), build the extensibility mechanism
