@@ -1,0 +1,36 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: acp-overprovisioner
+  namespace: acp-overprovisioner
+  labels:
+    app.kubernetes.io/part-of: acp-overprovisioner
+spec:
+  groups:
+    - name: acp-overprovisioner
+      rules:
+        - alert: OverprovisionerReplicasMissing
+          expr: |
+            kube_deployment_status_available_replicas{namespace="acp-overprovisioner", deployment="acp-overprovisioner"}
+              < kube_deployment_spec_replicas{namespace="acp-overprovisioner", deployment="acp-overprovisioner"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Overprovisioner has fewer available replicas than desired.
+            description: >-
+              The acp-overprovisioner Deployment has had fewer available replicas
+              than desired for more than 15 minutes. Spare capacity for agentic
+              sessions may be reduced.
+        - alert: OverprovisionerDeploymentMissing
+          expr: |
+            absent(kube_deployment_status_available_replicas{namespace="acp-overprovisioner", deployment="acp-overprovisioner"})
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: Overprovisioner deployment is missing.
+            description: >-
+              The acp-overprovisioner Deployment has been absent for more than
+              30 minutes. No spare capacity is being reserved for agentic
+              session runners, which may result in slow pod startup times.
